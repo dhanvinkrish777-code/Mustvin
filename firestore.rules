@@ -1,0 +1,227 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model & Security Invariants
+    // ===============================================================
+    // Collection: /users/{userId}
+    //   - Keys (exact): ['uid', 'email', 'displayName', 'photoURL', 'createdAt', 'updatedAt']
+    //   - Immutable: uid, createdAt
+    //   - Access: Verified owner only (request.auth.uid == userId)
+    //
+    // Collection: /users/{userId}/chats/{chatId}
+    //   - Keys (exact): ['ownerId', 'title', 'messageCount', 'createdAt', 'updatedAt']
+    //   - Immutable: ownerId, createdAt
+    //   - Access: Verified owner only (request.auth.uid == userId && ownerId == request.auth.uid)
+    //
+    // Collection: /users/{userId}/chats/{chatId}/messages/{messageId}
+    //   - Keys (exact): ['chatId', 'ownerId', 'role', 'text', 'sourcesJson', 'isOfflineGenerated', 'clientOrder', 'createdAt']
+    //   - Immutable: chatId, ownerId, role, clientOrder, createdAt
+    //   - Access: Verified owner only + parent ChatSession existence & ownership check on create
+    // ===============================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_-]+$');
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && isValidId(userId) && request.auth.uid == userId;
+    }
+
+    function isValidEmail(email) {
+      return email is string
+        && email.size() >= 3
+        && email.size() <= 254
+        && email.matches('^[a-zA-Z0-9._%+\\-]+@[a-zA-Z0-9.\\-]+\\.[a-zA-Z]{2,}$');
+    }
+
+    function isValidUserProfileFields(data, userId) {
+      let exactKeys = ['uid', 'email', 'displayName', 'photoURL', 'createdAt', 'updatedAt'];
+      return data.keys().hasAll(exactKeys)
+        && data.keys().hasOnly(exactKeys)
+        && data.uid is string
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidEmail(data.email)
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 100
+        && data.photoURL is string
+        && data.photoURL.size() <= 1000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatSessionFields(data, userId) {
+      let exactKeys = ['ownerId', 'title', 'messageCount', 'createdAt', 'updatedAt'];
+      return data.keys().hasAll(exactKeys)
+        && data.keys().hasOnly(exactKeys)
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 160
+        && data.messageCount is int
+        && data.messageCount >= 0
+        && data.messageCount <= 5000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessageFields(data, userId, chatId) {
+      let exactKeys = [
+        'chatId',
+        'ownerId',
+        'role',
+        'text',
+        'sourcesJson',
+        'isOfflineGenerated',
+        'clientOrder',
+        'createdAt'
+      ];
+      return data.keys().hasAll(exactKeys)
+        && data.keys().hasOnly(exactKeys)
+        && data.chatId is string
+        && data.chatId == chatId
+        && data.ownerId is string
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.role is string
+        && (data.role == 'user' || data.role == 'model')
+        && data.text is string
+        && data.text.size() >= 1
+        && data.text.size() <= 25000
+        && data.sourcesJson is string
+        && data.sourcesJson.size() >= 2
+        && data.sourcesJson.size() <= 8000
+        && data.isOfflineGenerated is bool
+        && data.clientOrder is int
+        && data.clientOrder >= 0
+        && data.clientOrder <= 99999999999999
+        && data.createdAt is timestamp;
+    }
+
+    function hasValidParentChat(userId, chatId) {
+      return (
+        exists(/databases/$(database)/documents/users/$(userId)/chats/$(chatId))
+        && get(/databases/$(database)/documents/users/$(userId)/chats/$(chatId)).data.ownerId == request.auth.uid
+      ) || (
+        existsAfter(/databases/$(database)/documents/users/$(userId)/chats/$(chatId))
+        && getAfter(/databases/$(database)/documents/users/$(userId)/chats/$(chatId)).data.ownerId == request.auth.uid
+      );
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId)
+        && isValidUserProfileFields(request.resource.data, userId)
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && resource.data.uid == request.auth.uid
+        && isValidUserProfileFields(request.resource.data, userId)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'email',
+          'displayName',
+          'photoURL',
+          'updatedAt'
+        ])
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedAt == request.time;
+
+      allow delete: if false;
+
+      match /chats/{chatId} {
+        allow get: if isOwner(userId)
+          && isValidId(chatId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow list: if isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isOwner(userId)
+          && isValidId(chatId)
+          && isValidChatSessionFields(request.resource.data, userId)
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.updatedAt == request.time;
+
+        allow update: if isOwner(userId)
+          && isValidId(chatId)
+          && resource.data.ownerId == request.auth.uid
+          && isValidChatSessionFields(request.resource.data, userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'title',
+            'messageCount',
+            'updatedAt'
+          ])
+          && request.resource.data.ownerId == resource.data.ownerId
+          && request.resource.data.createdAt == resource.data.createdAt
+          && request.resource.data.updatedAt == request.time;
+
+        allow delete: if isOwner(userId)
+          && isValidId(chatId)
+          && resource.data.ownerId == request.auth.uid;
+
+        match /messages/{messageId} {
+          allow get: if isOwner(userId)
+            && isValidId(chatId)
+            && isValidId(messageId)
+            && resource.data.ownerId == request.auth.uid
+            && resource.data.chatId == chatId;
+
+          allow list: if isOwner(userId)
+            && isValidId(chatId)
+            && resource.data.ownerId == request.auth.uid;
+
+          allow create: if isOwner(userId)
+            && isValidId(chatId)
+            && isValidId(messageId)
+            && hasValidParentChat(userId, chatId)
+            && isValidChatMessageFields(request.resource.data, userId, chatId)
+            && request.resource.data.createdAt == request.time;
+
+          allow update: if isOwner(userId)
+            && isValidId(chatId)
+            && isValidId(messageId)
+            && resource.data.ownerId == request.auth.uid
+            && resource.data.chatId == chatId
+            && isValidChatMessageFields(request.resource.data, userId, chatId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'text',
+              'sourcesJson',
+              'isOfflineGenerated'
+            ])
+            && request.resource.data.ownerId == resource.data.ownerId
+            && request.resource.data.chatId == resource.data.chatId
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.clientOrder == resource.data.clientOrder
+            && request.resource.data.createdAt == resource.data.createdAt;
+
+          allow delete: if isOwner(userId)
+            && isValidId(chatId)
+            && isValidId(messageId)
+            && resource.data.ownerId == request.auth.uid;
+        }
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

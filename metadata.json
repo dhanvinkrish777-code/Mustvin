@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS Multi-Modal AI System & Python Lab",
+  "description": "JARVIS AI with conversational intelligence, male voice speech, AR camera dimension measurement, gesture & finger controlled 3D holographic ball, and 10m device radar scanner with full exportable Python code.",
+  "requestFramePermissions": ["camera", "microphone", "bluetooth", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
